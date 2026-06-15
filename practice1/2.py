@@ -5,29 +5,34 @@ from math import log2
 import matplotlib.pyplot as plt
 import requests
 from bs4 import BeautifulSoup
+from typing import List, Tuple, Optional
 
-# --- Константи ---
 OUTPUT_FILE = "results2.txt"
-IMG_FOLDER = "img2"  # Назва папки для зображень
+IMG_FOLDER = "img2"
 
 
-def get_text_from_url(url):
+def get_text_from_url(url: str) -> Optional[str]:
+    """
+    Downloads raw HTML content from the specified URL, sanitizes it by removing
+    script and style components, and returns clean, stripped text block.
+    """
     try:
-        # Додаємо User-Agent, щоб імітувати запит від браузера
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/91.0.4472.124 Safari/537.36'
+            )
         }
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()  # Генерує помилку для кодів 4xx/5xx
+        response.raise_for_status()
 
-        # Використовуємо 'html.parser' - вбудований парсер
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Видаляємо теги script та style разом з їх вмістом
+        # Decompose scripting and styling tags
         for script_or_style in soup(['script', 'style']):
             script_or_style.decompose()
 
-        # Отримуємо текст і очищуємо його від зайвих пробілів
         text = soup.get_text()
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
@@ -36,52 +41,48 @@ def get_text_from_url(url):
         return clean_text
 
     except requests.RequestException as e:
-        print(f"Помилка: Не вдалося завантажити сторінку. {e}")
+        print(f"Error: Failed to fetch webpage content. Details: {e}")
         return None
 
 
-def write_to_file(content):
-    """Записує контент у вихідний файл."""
+def write_to_file(content: str) -> None:
+    """Writes the analysis report to the output file."""
     with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
         f.write(content + "\n\n")
 
 
-def analyze_text(text, source_url):
+def analyze_text(text: str, source_url: str) -> List[Tuple[str, int, float]]:
     """
-    Аналізує текст: розраховує частоту символів, ентропію та кількість інформації.
+    Analyzes the text frequency counts, Shannon entropy, and total information content.
+    Appends the calculated report to results2.txt and returns the symbol frequency profiles.
     """
     n = len(text)
     if n == 0:
-        print("На сайті не знайдено тексту для аналізу.")
-        return [], 0.0, 0.0
+        print("Error: Empty website content. Nothing to analyze.")
+        return []
 
     counter = Counter(text)
-    # Створюємо список з інформацією про кожен символ
-    # (символ, кількість, ймовірність)
     inf_list = [(char, freq, freq / n) for char, freq in counter.items()]
-    # Сортуємо за кількістю для наочності
     inf_list.sort(key=lambda x: x[1], reverse=True)
 
-    # Розрахунок ентропії за формулою Шеннона
+    # Shannon Entropy Calculation
     H = -sum(p * log2(p) for _, _, p in inf_list if p > 0)
-    # Розрахунок повної кількості інформації
     I = H * n
 
-    header = f"=== Аналіз сайту: {source_url} ==="
+    header = f"=== Website Analysis: {source_url} ==="
     stats = [
         header,
-        f"Загальна довжина тексту: {n} символів",
+        f"Total text length: {n} symbols",
         "-" * 40,
-        "Символ | Кількість | Ймовірність",
+        "Symbol | Frequency | Probability",
         "-" * 40
     ]
     for char, freq, p in inf_list:
-        # repr(char) для наочного відображення спецсимволів, як '\n'
         stats.append(f"{repr(char):<7}| {freq:<10}| {p:.6f}")
 
     stats.append("-" * 40)
-    stats.append(f"Ентропія (H): {H:.4f} біт/символ")
-    stats.append(f"Кількість інформації (I): {I:.2f} біт (~{I / 8 / 1024:.2f} Кбайт)")
+    stats.append(f"Entropy (H): {H:.4f} bits/symbol")
+    stats.append(f"Information Quantity (I): {I:.2f} bits (~{I / 8 / 1024:.2f} KB)")
 
     report = "\n".join(stats)
     print(report)
@@ -90,15 +91,12 @@ def analyze_text(text, source_url):
     return inf_list
 
 
-def save_char_distribution_plot(inf_list, source_url):
-    """
-    Створює та зберігає гістограму розподілу символів.
-    """
+def save_char_distribution_plot(inf_list: List[Tuple[str, int, float]], source_url: str) -> None:
+    """Generates and saves a histogram for the top 30 most frequent characters."""
     if not inf_list:
-        print("Немає даних для побудови графіка.")
+        print("No character statistics available to plot.")
         return
 
-    # Для кращої візуалізації візьмемо 30 найпопулярніших символів
     top_n = 30
     inf_list_top = inf_list[:top_n]
 
@@ -107,58 +105,48 @@ def save_char_distribution_plot(inf_list, source_url):
 
     plt.figure(figsize=(15, 8))
     plt.bar(chars, counts, color='skyblue')
-    plt.xlabel("Символи", fontsize=12)
-    plt.ylabel("Кількість", fontsize=12)
-    plt.title(f"Частота появи {top_n} найпопулярніших символів на сайті:\n{source_url}", fontsize=14)
+    plt.xlabel("Symbols", fontsize=12)
+    plt.ylabel("Frequency", fontsize=12)
+    plt.title(f"Top {top_n} Character Frequencies on Site:\n{source_url}", fontsize=14)
     plt.xticks(rotation=45, ha='right')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
 
-    # Створюємо безпечне ім'я файлу з URL
     parsed_url = urlparse(source_url)
-    # Використовуємо доменне ім'я, замінюючи точки на підкреслення
     filename_prefix = parsed_url.netloc.replace('.', '_')
     filename = f"{filename_prefix}_char_distribution.png"
-
     full_path = os.path.join(IMG_FOLDER, filename)
 
     plt.savefig(full_path, dpi=200)
     plt.close()
-    print(f"\nГрафік розподілу символів збережено у файл: {os.path.abspath(full_path)}")
+    print(f"Character frequency chart saved to: {os.path.abspath(full_path)}")
 
 
-def main():
-    """Головна функція програми."""
-    # Створюємо папку для зображень, якщо вона не існує
+def main() -> None:
     os.makedirs(IMG_FOLDER, exist_ok=True)
 
-    # Очищуємо файл результатів при новому запуску
     if os.path.exists(OUTPUT_FILE):
         os.remove(OUTPUT_FILE)
-        print(f"Файл '{OUTPUT_FILE}' очищено.")
+        print(f"Cleaned legacy output file: '{OUTPUT_FILE}'")
 
     while True:
-        url = input("\nВведіть URL сайту для аналізу (або '0' для виходу): ").strip()
+        url = input("\nEnter website URL for evaluation (or '0' to exit): ").strip()
         if url == '0':
-            print("Вихід з програми.")
+            print("Exiting application.")
             break
 
-        # Перевірка, чи введено хоча б щось схоже на URL
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
-            print(f"URL автоматично виправлено на: {url}")
+            print(f"Autocorrected URL target: {url}")
 
-        print("\nЗавантаження та обробка даних...")
+        print("Fetching and processing data from site...")
         text = get_text_from_url(url)
 
         if text:
-            # Якщо текст отримано успішно, аналізуємо його
             inf_list = analyze_text(text, url)
-            # Будуємо та зберігаємо графік
             save_char_distribution_plot(inf_list, url)
         else:
-            # Якщо текст не отримано, повідомляємо користувача
-            print(f"Не вдалося отримати текстовий вміст для {url}. Спробуйте інший сайт.")
+            print(f"Could not load content from {url}. Please try another website.")
 
 
 if __name__ == "__main__":

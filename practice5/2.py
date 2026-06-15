@@ -1,42 +1,32 @@
 import sys
 from decimal import Decimal, getcontext
-from collections import Counter  # Використаємо Counter для легкого підрахунку
+from collections import Counter
+from typing import Dict, Tuple
 
-# --- 1. Налаштування ---
+# Set high precision for large text encoding intervals
 getcontext().prec = 2100
 
 
-# --- 2. Функції для Адаптивної Моделі ---
-def preprocess_text(text):
-    """Приводимо все до одного регістру."""
+def preprocess_text(text: str) -> str:
+    """Preprocesses text by converting to uppercase."""
     return text.upper()
 
 
-def calculate_frequencies(text):
-    """
-    Обчислює точні імовірності для кожного символу в наданому тексті.
-    """
+def calculate_frequencies(text: str) -> Dict[str, Decimal]:
+    """Calculates exact probability frequencies for characters in the given text."""
     total_chars = Decimal(len(text))
     if total_chars == 0:
         return {}
 
     counts = Counter(text)
-
-    probabilities = {}
-    for char, count in counts.items():
-        probabilities[char] = Decimal(count) / total_chars
-
+    probabilities = {char: Decimal(count) / total_chars for char, count in counts.items()}
     return probabilities
 
 
-# --- 3. Функції, що залишились без змін ---
-def get_cumulative_freqs(probabilities):
-    """
-    Будує кумулятивну таблицю частот (CDF).
-    """
+def get_cumulative_freqs(probabilities: Dict[str, Decimal]) -> Dict[str, Tuple[Decimal, Decimal]]:
+    """Builds a Cumulative Distribution Function (CDF) map of low-high intervals for characters."""
     cdf = {}
     current_low = Decimal('0.0')
-    # Сортуємо для стабільності
     sorted_probs = sorted(probabilities.items(), key=lambda item: item[0])
     for char, prob in sorted_probs:
         cdf[char] = (current_low, current_low + prob)
@@ -44,12 +34,12 @@ def get_cumulative_freqs(probabilities):
     return cdf
 
 
-def arithmetic_encoding(text, cdf):
-    """Виконує кодування."""
+def arithmetic_encoding(text: str, cdf: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
+    """Encodes the text into a single high-precision real interval [low, high)."""
     low = Decimal('0.0')
     high = Decimal('1.0')
 
-    for i, char in enumerate(text):
+    for char in text:
         current_range = high - low
         char_low, char_high = cdf[char]
         high = low + current_range * char_high
@@ -58,13 +48,11 @@ def arithmetic_encoding(text, cdf):
     return low, high
 
 
-def fraction_to_binary(low, high):
-    """Конвертує інтервал у двійковий код."""
+def fraction_to_binary(low: Decimal, high: Decimal) -> str:
+    """Converts the final real interval [low, high) into a binary fraction string."""
     binary_code = "0."
     final_range = high - low
-    max_bits = 200
     k = 0
-    #and k < max_bits
     while (Decimal('2') ** (-k)) > final_range:
         k += 1
 
@@ -81,44 +69,42 @@ def fraction_to_binary(low, high):
     return binary_code
 
 
-# --- 4. Запуск ---
-text_to_encode = """
+def main() -> None:
+    text_to_encode = """
 Процесор є головним елементом будь-якого комп’ютера чи мобільного пристрою. Він відповідає за виконання всіх арифметичних, логічних і керуючих операцій, необхідних для роботи системи. Сучасні процесори мають багатоядерну архітектуру, що дозволяє одночасно виконувати декілька завдань. Кожне ядро може працювати незалежно, забезпечуючи високу швидкодію при багатозадачності. Важливими характеристиками процесора є тактова частота, кількість ядер, обсяг кеш-пам’яті та енергоспоживання. Висока частота забезпечує швидке виконання інструкцій, однак підвищує тепловиділення. Тому більшість пристроїв мають спеціальні режими енергозбереження, які динамічно регулюють швидкість роботи залежно від навантаження. У мобільних процесорах, таких як MediaTek Helio або Snapdragon, часто поєднуються продуктивні й енергоефективні ядра. Це дозволяє підтримувати баланс між швидкодією та тривалістю роботи від акумулятора. Програмні оптимізації MIUI чи Android також впливають на продуктивність, регулюючи частоти процесора, коли пристрій працює від батареї або підключений до мережі. У майбутньому процесори стануть ще розумнішими — із підтримкою штучного інтелекту, машинного навчання та автоматичної адаптації до поведінки користувача. Вони не лише обчислюватимуть дані, а й прогнозуватимуть потреби системи, забезпечуючи максимальну ефективність при мінімальному енергоспоживанні.
 """
 
-print(f"Вихідний текст ({len(text_to_encode)} символів):\n{text_to_encode[:200]}...\n")
+    print(f"Вихідний текст ({len(text_to_encode)} символів):\n{text_to_encode[:200].strip()}...\n")
 
-# 1. Готуємо текст (тільки .upper())
-processed = preprocess_text(text_to_encode)
-print(f"Текст після обробки ({len(processed)} символів)\n")
+    processed = preprocess_text(text_to_encode)
+    print(f"Текст після обробки ({len(processed)} символів)\n")
 
-# 2. Обчислюємо імовірності з тексту
-adaptive_probabilities = calculate_frequencies(processed)
+    adaptive_probabilities = calculate_frequencies(processed)
 
-print(f"--- Адаптивна Модель ---")
-print(f"Знайдено {len(adaptive_probabilities)} унікальних символів.")
-print("Обчислені імовірності для всіх символів:")
+    print("--- Адаптивна Модель ---")
+    print(f"Знайдено {len(adaptive_probabilities)} унікальних символів.")
+    print("Обчислені ймовірності для всіх символів:")
 
-# Сортуємо для зручності читання
-sorted_probs_list = sorted(adaptive_probabilities.items(), key=lambda item: item[1], reverse=True)
+    sorted_probs_list = sorted(adaptive_probabilities.items(), key=lambda item: item[1], reverse=True)
+    for char, prob in sorted_probs_list[:10]:
+        print(f"  '{char}': {prob:.5f}")
+    print("...\n")
 
-for char, prob in sorted_probs_list:
-    print(f"  '{char}': {prob:.5f}")  # {prob} - це і є імовірність
-print("...\n")
+    cdf_table = get_cumulative_freqs(adaptive_probabilities)
 
-# 3. Будуємо CDF на основі цих імовірностей
-cdf_table = get_cumulative_freqs(adaptive_probabilities)
+    print("Кодування, зачекайте кілька секунд...")
+    low, high = arithmetic_encoding(processed, cdf_table)
 
-# 4. Кодуємо
-print("Кодування, зачекайте кілька секунд...")
-low, high = arithmetic_encoding(processed, cdf_table)
+    print(f"low:  {low:.100f}...")
+    print(f"high: {high:.100f}...")
 
-print(low)
-print(high)
+    binary_result = fraction_to_binary(low, high)
 
-binary_result = fraction_to_binary(low, high)
+    print("\n--- РЕЗУЛЬТАТ (Адаптивна модель) ---")
+    print(f"Інтервал: [{low:.30f}, {high:.30f})")
+    print(f"Довжина: {high - low:.3e}")
+    print(f"Двійковий код (перші 200 біт):\n{binary_result[:200]}")
 
-print("\n--- РЕЗУЛЬТАТ (Адаптивна модель) ---")
-print(f"Інтервал: [{low:.30f}, {high:.30f})")
-print(f"Довжина: {high - low:.3e}")
-print(f"Двійковий код (200 біт максимум):\n{binary_result}")
+
+if __name__ == "__main__":
+    main()

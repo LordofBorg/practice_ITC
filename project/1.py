@@ -6,22 +6,25 @@ import base64
 from contextlib import closing
 import json
 import os
+from typing import List, Dict, Tuple, Any, Optional
 
-# ====== API URLs ======
-# STEAM_APP_LIST_URL видалено, оскільки App List тепер береться з локальної БД.
+# ====== API Endpoints ======
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
 STEAM_PLAYER_COUNT_URL = "https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/"
 
 DB_PATH = "steam_data_encrypted.db"
-SECRET_KEY = 57  # 🔑 ключ кодирования (можно поменять)
+SECRET_KEY = 57  # Symmetric XOR encryption key
 
 
-# ====== Простое XOR-кодирование строк ======
+# ====== Cryptographic Operations (XOR + Base64) ======
+
 def xor_cipher(text: str, key: int = SECRET_KEY) -> str:
+    """Applies a simple bitwise XOR symmetric cipher to the text string."""
     return ''.join(chr(ord(c) ^ key) for c in text)
 
 
-def encrypt_field(data: str) -> str:
+def encrypt_field(data: Optional[str]) -> str:
+    """Encrypts a text field using XOR cipher and base64 encoding."""
     if data is None:
         return ""
     encoded = xor_cipher(data)
@@ -29,13 +32,15 @@ def encrypt_field(data: str) -> str:
 
 
 def decrypt_field(data: str) -> str:
+    """Decrypts a base64-encoded XOR-ciphered text field."""
     if not data:
         return ""
     decoded = base64.b64decode(data.encode()).decode()
     return xor_cipher(decoded)
 
 
-# ====== Rules ======
+# ====== Heuristic Scoring Rules ======
+
 GENRE_RULES = {
     "action": {"score": 0.1, "reason": "often part of major sale events"},
     "adventure": {"score": 0.1, "reason": "popular in seasonal promotions"},
@@ -54,74 +59,52 @@ PUBLISHER_RULES = {
 }
 
 
-# -----------------------------------------------------------------------
-# ====== Database Connection & Setup ======
+# ====== Database Connections & Migrations ======
 
-def connect_db():
-    """Створює з'єднання з базою даних і встановлює row_factory."""
+def connect_db() -> sqlite3.Connection:
+    """Establishes an SQLite database connection and sets sqlite3.Row factory."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db():
-    """Ініціалізує необхідні таблиці в БД."""
+def init_db() -> None:
+    """Initializes the SQLite database schema for games and local app list cache."""
     try:
         with closing(connect_db()) as conn:
             c = conn.cursor()
+            # Table for query history and predictions
             c.execute("""
-                      CREATE TABLE IF NOT EXISTS games
-                      (
-                          id
-                          INTEGER
-                          PRIMARY
-                          KEY
-                          AUTOINCREMENT,
-                          appid
-                          INTEGER,
-                          name
-                          TEXT,
-                          publisher
-                          TEXT,
-                          developer
-                          TEXT,
-                          genres
-                          TEXT,
-                          final_price
-                          REAL,
-                          normal_price
-                          REAL,
-                          discount
-                          INTEGER,
-                          player_count
-                          INTEGER,
-                          score
-                          REAL,
-                          date
-                          TEXT,
-                          notes
-                          TEXT
-                      )
-                      """)
-            # НОВА таблиця для списку AppID (заміна Steam API GetAppList)
+                CREATE TABLE IF NOT EXISTS games (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    appid INTEGER,
+                    name TEXT,
+                    publisher TEXT,
+                    developer TEXT,
+                    genres TEXT,
+                    final_price REAL,
+                    normal_price REAL,
+                    discount INTEGER,
+                    player_count INTEGER,
+                    score REAL,
+                    date TEXT,
+                    notes TEXT
+                )
+            """)
+            # Local cache table for Steam game titles to avoid hitting official API lists
             c.execute("""
-                      CREATE TABLE IF NOT EXISTS app_list
-                      (
-                          appid
-                          INTEGER
-                          PRIMARY
-                          KEY,
-                          name
-                          TEXT
-                      )
-                      """)
+                CREATE TABLE IF NOT EXISTS app_list (
+                    appid INTEGER PRIMARY KEY,
+                    name TEXT
+                )
+            """)
             conn.commit()
     except Exception as e:
         print(f"Error initializing database schema: {e}")
 
 
-def populate_app_list_from_json(json_file='allgame.json'):
-    """Завантажує дані з JSON файлу 'allgame.json' у таблицю app_list."""
+def populate_app_list_from_json(json_file: str = 'allgame.json') -> None:
+    """Loads AppID mapping cache from JSON file into SQLite database app_list table."""
     if not os.path.exists(json_file):
         print(f"Error: JSON file '{json_file}' not found. Cannot populate App List DB.")
         return
@@ -134,7 +117,7 @@ def populate_app_list_from_json(json_file='allgame.json'):
         print(f"Error: Invalid JSON format in '{json_file}'.")
         return
     except Exception as e:
-        print(f"An unexpected error occurred during JSON loading: {e}")
+        print(f"Unexpected error loading JSON file: {e}")
         return
 
     total_apps = len(apps)
@@ -146,48 +129,42 @@ def populate_app_list_from_json(json_file='allgame.json'):
 
     with closing(connect_db()) as conn:
         with conn:
-            conn.executemany("INSERT OR REPLACE INTO app_list (appid, name) VALUES (?, ?)",
-                             app_data)
+            conn.executemany("INSERT OR REPLACE INTO app_list (appid, name) VALUES (?, ?)", app_data)
             print(f"✅ Database populated with {total_apps} apps from {json_file}.")
 
 
-# -----------------------------------------------------------------------
-# ====== Steam data fetchers ======
+# ====== Steam Web API Fetchers ======
 
-def find_appid(game_name, exact=False):
-    """
-    Шукає AppID в локальній базі даних app_list.
-    """
+def find_appid(game_name: str, exact: bool = False) -> List[Dict[str, Any]]:
+    """Searches for AppIDs matching the game title in the local SQLite app_list cache."""
     search_term = game_name.lower().strip()
     if not search_term:
         return []
 
     with closing(connect_db()) as conn:
         c = conn.cursor()
-
         if exact:
-            # Точне співпадіння (без урахування регістру)
             query = "SELECT appid, name FROM app_list WHERE LOWER(name) = ? LIMIT 10"
             c.execute(query, (search_term,))
         else:
-            # Часткове співпадіння (LIKE)
             query = "SELECT appid, name FROM app_list WHERE LOWER(name) LIKE ? LIMIT 10"
             c.execute(query, (f'%{search_term}%',))
 
         return [dict(row) for row in c.fetchall()]
 
 
-def get_steam_info(appid):
+def get_steam_info(appid: int) -> Optional[Dict[str, Any]]:
+    """Queries Steam App Details Web API for price, genres, developer, and publisher."""
     try:
-        r = requests.get(f"{STEAM_APP_DETAILS_URL}?appids={appid}&cc=ua1&l=en")
+        r = requests.get(f"{STEAM_APP_DETAILS_URL}?appids={appid}&cc=ua&l=en")
         r.raise_for_status()
         data = r.json().get(str(appid), {}).get("data", {})
         if not data or "price_overview" not in data:
             return None
         price_info = data["price_overview"]
         return {
-            "final_price": price_info["final"] / 100,
-            "normal_price": price_info["initial"] / 100,
+            "final_price": price_info["final"] / 100.0,
+            "normal_price": price_info["initial"] / 100.0,
             "discount": price_info["discount_percent"],
             "genres": [g["description"] for g in data.get("genres", [])],
             "publisher": data.get("publishers", ["Unknown"])[0],
@@ -197,7 +174,8 @@ def get_steam_info(appid):
         return None
 
 
-def get_player_count(appid):
+def get_player_count(appid: int) -> Optional[int]:
+    """Queries official Steam API for active player online count."""
     try:
         r = requests.get(f"{STEAM_PLAYER_COUNT_URL}?appid={appid}")
         r.raise_for_status()
@@ -206,17 +184,21 @@ def get_player_count(appid):
         return None
 
 
-# ====== Discount Analysis ======
-def analyze_discount(game_info, player_count):
+# ====== Sales Analysis Engine ======
+
+def analyze_discount(game_info: Dict[str, Any], player_count: Optional[int]) -> Tuple[float, str]:
+    """Computes a heuristic score representing the likelihood of an upcoming discount."""
     score = 0.5
     reasons = []
 
+    # 1. Evaluate genre rules
     for g in game_info.get("genres", []):
         gl = g.lower()
         if gl in GENRE_RULES:
             score += GENRE_RULES[gl]["score"]
             reasons.append(f"As a {g} game, it {GENRE_RULES[gl]['reason']}.")
 
+    # 2. Evaluate publisher rules
     pub = game_info.get("publisher", "").lower()
     matched = False
     for key in PUBLISHER_RULES:
@@ -228,6 +210,7 @@ def analyze_discount(game_info, player_count):
     if not matched:
         reasons.append(f"Publisher '{game_info.get('publisher')}' has unpredictable discount behavior.")
 
+    # 3. Evaluate current discount state
     current_discount = game_info.get("discount", 0)
     if current_discount > 0:
         if current_discount >= 60:
@@ -242,6 +225,7 @@ def analyze_discount(game_info, player_count):
     else:
         reasons.append("No discount currently, which leaves full room for a possible drop.")
 
+    # 4. Seasonal trends
     m = datetime.datetime.now().month
     if m in [6, 7]:
         reasons.append("Summer Sale season coming, good chance for deals.")
@@ -250,6 +234,7 @@ def analyze_discount(game_info, player_count):
         reasons.append("Winter/End-year sales ahead, higher chance of discounts.")
         score += 0.1
 
+    # 5. Online player count popularity factor
     if player_count is not None:
         if player_count < 500:
             reasons.append(f"Online is low ({player_count} players) — likely candidate for upcoming discount.")
@@ -263,47 +248,54 @@ def analyze_discount(game_info, player_count):
     else:
         reasons.append("Could not retrieve player count — skipping online-based prediction.")
 
+    # 6. Apply small random perturbation
     score += random.uniform(-0.05, 0.05)
-    score = round(max(0, min(1, score)), 2)
+    score = round(max(0.0, min(1.0, score)), 2)
 
     explanation = (
-            f"Predicted discount likelihood: {int(score * 100)}%.\n"
-            "Analysis:\n" + "\n".join(f" - {r}" for r in reasons) +
-            "\nBased on price, genre, publisher, season, and online activity."
+        f"Predicted discount likelihood: {int(score * 100)}%.\n"
+        "Analysis:\n" + "\n".join(f" - {r}" for r in reasons) +
+        "\nBased on price, genre, publisher, season, and online activity."
     )
     return score, explanation
 
 
-# -----------------------------------------------------------------------
-# ====== Database ======
+# ====== Data Persistence Layer (SQLite) ======
 
-# init_db було перенесено вище, щоб об'єднати створення обох таблиць.
-
-def save_result(appid, name, info, player_count, score, notes):
+def save_result(
+    appid: int,
+    name: str,
+    info: Dict[str, Any],
+    player_count: Optional[int],
+    score: float,
+    notes: str
+) -> None:
+    """Encrypts game statistics and commits a new record into the SQLite history cache."""
     with closing(connect_db()) as conn:
         c = conn.cursor()
         c.execute("""
-                  INSERT INTO games (appid, name, publisher, developer, genres, final_price,
-                                     normal_price, discount, player_count, score, date, notes)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  """, (
-                      appid,
-                      encrypt_field(name),
-                      encrypt_field(info["publisher"]),
-                      encrypt_field(info["developer"]),
-                      encrypt_field(", ".join(info["genres"])),
-                      info["final_price"],
-                      info["normal_price"],
-                      info["discount"],
-                      player_count,
-                      score,
-                      datetime.datetime.now().isoformat(),
-                      encrypt_field(notes)
-                  ))
+            INSERT INTO games (appid, name, publisher, developer, genres, final_price,
+                               normal_price, discount, player_count, score, date, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            appid,
+            encrypt_field(name),
+            encrypt_field(info["publisher"]),
+            encrypt_field(info["developer"]),
+            encrypt_field(", ".join(info["genres"])),
+            info["final_price"],
+            info["normal_price"],
+            info["discount"],
+            player_count,
+            score,
+            datetime.datetime.now().isoformat(),
+            encrypt_field(notes)
+        ))
         conn.commit()
 
 
-def search_history_keyword(keyword):
+def search_history_keyword(keyword: str) -> List[Dict[str, Any]]:
+    """Retrieves and decrypts database records whose game names match the keyword."""
     with closing(connect_db()) as conn:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -321,7 +313,9 @@ def search_history_keyword(keyword):
                 result.append(r)
         return result
 
-def search_history_id(id):
+
+def search_history_id(id: int) -> List[Dict[str, Any]]:
+    """Retrieves and decrypts database records whose Steam AppIDs match the search ID."""
     with closing(connect_db()) as conn:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -340,17 +334,22 @@ def search_history_id(id):
         return result
 
 
-# -----------------------------------------------------------------------
-# ====== Main ======
-def main():
+# ====== Command-line Interface Entry ======
+
+def main() -> None:
     init_db()
-    populate_app_list_from_json()  # Новий виклик для заповнення БД списком ігор
+    populate_app_list_from_json()
     print("-" * 30)
 
     choice = input("1 - Analyze new game, 2 - View history: ").strip()
 
     if choice == "2":
-        tip = int(input("Enter type of search — [1] keyword, [2] ID? : "))
+        try:
+            tip = int(input("Enter type of search — [1] keyword, [2] ID? : "))
+        except ValueError:
+            print("Invalid input. Selection must be a number.")
+            return
+
         if tip == 1:
             kw = input("Enter keyword for search: ").strip()
             results = search_history_keyword(kw)
@@ -360,27 +359,26 @@ def main():
                 print("\n=== Search results ===")
                 for r in results:
                     print(f"[{r['date'][:19]}] {r['name']} ({r['discount']}%) → Likelihood: {int(r['score'] * 100)}%")
-            return
         else:
             kw = input("Enter ID for search: ").strip()
-            results = search_history_id(int(kw))
+            try:
+                results = search_history_id(int(kw))
+            except ValueError:
+                print("Invalid ID format.")
+                return
             if not results:
                 print("No results found.")
             else:
                 print("\n=== Search results ===")
                 for r in results:
                     print(f"[{r['date'][:19]}] {r['name']} ({r['discount']}%) → Likelihood: {int(r['score'] * 100)}%")
-            return
+        return
 
-    #game_name = input("Enter game name: ").strip()
-    mode = input("Search type — [1] partial, [2] exact or [3] id? ").strip()
+    mode = input("Search type — [1] partial name, [2] exact name, [3] AppID? ").strip()
     if mode != "3":
-        exact = mode == "2"
-
+        exact = (mode == "2")
         game_name = input("Enter game name: ").strip()
         matches = find_appid(game_name, exact)
-        # Зверніть увагу: повідомлення "Game not found in Steam App List." збережено,
-        # хоча App List тепер локальний.
         if not matches:
             print("Game not found in Steam App List.")
             return
@@ -392,24 +390,28 @@ def main():
 
             while True:
                 try:
-                    choice = int(input("\nEnter number: "))
-                    if 1 <= choice <= len(matches):
-                        appid = matches[choice - 1]["appid"]
-                        name = matches[choice - 1]["name"]
+                    choice_num = int(input("\nEnter selection index: "))
+                    if 1 <= choice_num <= len(matches):
+                        appid = matches[choice_num - 1]["appid"]
+                        name = matches[choice_num - 1]["name"]
                         break
-                    print("Invalid choice. Try again.")
+                    print("Invalid index choice. Try again.")
                 except ValueError:
-                    print("Invalid input. Please enter a number.")
+                    print("Invalid input. Please enter a valid number.")
         else:
             appid = matches[0]["appid"]
             name = matches[0]["name"]
     else:
-        appid = int(input("Enter the ID of the game: "))
+        try:
+            appid = int(input("Enter the AppID of the game: "))
+        except ValueError:
+            print("AppID must be a numeric integer.")
+            return
         name = "---"
 
     info = get_steam_info(appid)
     if not info:
-        print("Failed to get info.")
+        print("Failed to retrieve product details from Steam Web API.")
         return
 
     players = get_player_count(appid)
